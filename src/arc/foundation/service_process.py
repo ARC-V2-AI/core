@@ -125,6 +125,10 @@ class ServiceProcess:
                 str(result_fd),
             ]
 
+            # Pulse owns service shutdown. Ignore terminal Ctrl+C in child
+            # processes and let Pulse send the graceful IPC stop command.
+            _ = signal.signal(signal.SIGINT, signal.SIG_IGN)
+
             os.execve(
                 runtime_python,
                 argv,

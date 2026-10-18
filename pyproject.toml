@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arc-v2-core"
-version = "0.5.1"
+version = "0.6.0"
 description = "The operating core of ARC V2: a Linux-native foundation for service installation, supervision, lifecycle management, and execution."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ dependencies = [
     "cyclopts>=4.22.5",
     "packaging>=26.3",
     "pydantic>=2.13.5",
+    "pytest>=9.1.1",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "rich>=15.0.0",

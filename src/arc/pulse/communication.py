@@ -3,6 +3,7 @@
 The broker is deliberately separate from Pulse's control socket: the latter is
 for supervisor commands, while this protocol is for service-to-service calls.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,12 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from arc_service.communication import (
+    EVENT_LEASE_SECONDS,
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
-    EVENT_LEASE_SECONDS,
     Activate,
     EventAck,
     EventDelivery,
@@ -38,8 +37,14 @@ from arc_service.communication import (
     RpcCall,
     RpcRequest,
     RpcResult,
+    RpcStreamCall,
+    RpcStreamCancel,
+    RpcStreamEnd,
+    RpcStreamItem,
+    RpcStreamRequest,
     ServicesList,
 )
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 MAX_DELIVERY_ATTEMPTS = 10
@@ -62,7 +67,12 @@ class _Client:
 
     async def send(self, message: Any) -> None:
         if isinstance(message, dict):
-            data = json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+            data = (
+                json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode(
+                    "utf-8"
+                )
+                + b"\n"
+            )
         else:
             data = message.model_dump_json().encode("utf-8") + b"\n"
         if len(data) > MAX_FRAME_BYTES:
@@ -96,6 +106,7 @@ class CommunicationBroker:
         self._clients_lock = asyncio.Lock()
         self._db_lock = asyncio.Lock()
         self._pending_calls: dict[str, tuple[str, str]] = {}
+        self._pending_streams: dict[str, tuple[str, str]] = {}
         self._db: sqlite3.Connection | None = None
 
     async def start(self) -> None:
@@ -264,7 +275,10 @@ class CommunicationBroker:
                     existing = self._clients[hello.service_id]
                     if not existing.closed:
                         await client.send(
-                            HelloAck(ok=False, error=f"Service {hello.service_id!r} is already connected")
+                            HelloAck(
+                                ok=False,
+                                error=f"Service {hello.service_id!r} is already connected",
+                            )
                         )
                         return
                 self._clients[hello.service_id] = client
@@ -287,11 +301,17 @@ class CommunicationBroker:
                     raise ValueError("incoming message exceeds maximum frame size")
                 try:
                     message = json.loads(raw)
-                    if not isinstance(message, dict) or not isinstance(message.get("type"), str):
+                    if not isinstance(message, dict) or not isinstance(
+                        message.get("type"), str
+                    ):
                         raise ValueError("message must be an object with a type field")
                     await self._dispatch(client, message)
                 except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-                    logger.warning("Invalid communication message from %s: %s", client.service_id, exc)
+                    logger.warning(
+                        "Invalid communication message from %s: %s",
+                        client.service_id,
+                        exc,
+                    )
                     await client.send(ProtocolErrorMessage(error=str(exc)[:2048]))
         except asyncio.CancelledError:
             raise
@@ -301,7 +321,9 @@ class CommunicationBroker:
             logger.warning("Rejected ARC communication connection: %s", exc)
             if client is None:
                 try:
-                    await self._send_raw(writer, HelloAck(ok=False, error=str(exc)[:2048]))
+                    await self._send_raw(
+                        writer, HelloAck(ok=False, error=str(exc)[:2048])
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -341,11 +363,19 @@ class CommunicationBroker:
                         (client.service_id, *sorted(client.subscriptions)),
                     )
                 else:
-                    db.execute("DELETE FROM deliveries WHERE service_id=?", (client.service_id,))
-                db.execute("DELETE FROM subscriptions WHERE service_id=?", (client.service_id,))
+                    db.execute(
+                        "DELETE FROM deliveries WHERE service_id=?",
+                        (client.service_id,),
+                    )
+                db.execute(
+                    "DELETE FROM subscriptions WHERE service_id=?", (client.service_id,)
+                )
                 db.executemany(
                     "INSERT INTO subscriptions(service_id, event_type) VALUES (?, ?)",
-                    [(client.service_id, event_type) for event_type in sorted(client.subscriptions)],
+                    [
+                        (client.service_id, event_type)
+                        for event_type in sorted(client.subscriptions)
+                    ],
                 )
                 db.execute(
                     "DELETE FROM events WHERE NOT EXISTS "
@@ -374,6 +404,25 @@ class CommunicationBroker:
         if message_type == "rpc_result":
             message = RpcResult.model_validate(raw)
             await self._route_rpc_result(client, message)
+            return
+        if message_type == "rpc_stream_call":
+            message = RpcStreamCall.model_validate(raw)
+            await self._route_stream_call(client, message)
+            return
+
+        if message_type == "rpc_stream_item":
+            message = RpcStreamItem.model_validate(raw)
+            await self._route_stream_item(client, message)
+            return
+
+        if message_type == "rpc_stream_end":
+            message = RpcStreamEnd.model_validate(raw)
+            await self._route_stream_end(client, message)
+            return
+
+        if message_type == "rpc_stream_cancel":
+            message = RpcStreamCancel.model_validate(raw)
+            await self._route_stream_cancel(client, message)
             return
         if message_type == "publish":
             message = Publish.model_validate(raw)
@@ -468,7 +517,10 @@ class CommunicationBroker:
             return
         caller_id, target_id = pending
         if target_id != responder.service_id:
-            logger.warning("Ignoring RPC response with mismatched service identity from %s", responder.service_id)
+            logger.warning(
+                "Ignoring RPC response with mismatched service identity from %s",
+                responder.service_id,
+            )
             return
         async with self._clients_lock:
             caller = self._clients.get(caller_id)
@@ -479,11 +531,196 @@ class CommunicationBroker:
         except (ConnectionError, OSError, ValueError):
             logger.debug("Caller %s disconnected before RPC response", caller_id)
 
+    async def _route_stream_call(
+        self,
+        caller: _Client,
+        message: RpcStreamCall,
+    ) -> None:
+        if message.target == caller.service_id:
+            await caller.send(
+                RpcStreamEnd(
+                    id=message.id,
+                    ok=False,
+                    error="A service cannot stream RPC to itself through the broker",
+                    error_type="INVALID_TARGET",
+                )
+            )
+            return
+
+        async with self._clients_lock:
+            target = self._clients.get(message.target)
+
+        if target is None or target.closed or not target.active:
+            await caller.send(
+                RpcStreamEnd(
+                    id=message.id,
+                    ok=False,
+                    error=f"Service {message.target!r} is unavailable",
+                    error_type="SERVICE_UNAVAILABLE",
+                )
+            )
+            return
+
+        if message.method not in target.rpc_methods:
+            await caller.send(
+                RpcStreamEnd(
+                    id=message.id,
+                    ok=False,
+                    error=(
+                        f"Service {message.target!r} does not expose "
+                        f"stream method {message.method!r}"
+                    ),
+                    error_type="RPC_METHOD_NOT_FOUND",
+                )
+            )
+            return
+
+        if message.id in self._pending_streams or message.id in self._pending_calls:
+            await caller.send(
+                RpcStreamEnd(
+                    id=message.id,
+                    ok=False,
+                    error="Duplicate RPC request ID",
+                    error_type="INVALID_REQUEST",
+                )
+            )
+            return
+
+        self._pending_streams[message.id] = (
+            caller.service_id,
+            target.service_id,
+        )
+
+        try:
+            await target.send(
+                RpcStreamRequest(
+                    id=message.id,
+                    caller=caller.service_id,
+                    method=message.method,
+                    payload=message.payload,
+                )
+            )
+        except (ConnectionError, OSError, ValueError):
+            self._pending_streams.pop(message.id, None)
+
+            await caller.send(
+                RpcStreamEnd(
+                    id=message.id,
+                    ok=False,
+                    error=f"Service {message.target!r} disconnected while starting stream",
+                    error_type="SERVICE_UNAVAILABLE",
+                )
+            )
+
+    async def _route_stream_item(
+        self,
+        responder: _Client,
+        message: RpcStreamItem,
+    ) -> None:
+        pending = self._pending_streams.get(message.id)
+        if pending is None:
+            return
+
+        caller_id, target_id = pending
+
+        if responder.service_id != target_id:
+            logger.warning(
+                "Ignoring stream item with mismatched service identity: %s",
+                responder.service_id,
+            )
+            return
+
+        async with self._clients_lock:
+            caller = self._clients.get(caller_id)
+
+        if caller is None or caller.closed:
+            return
+
+        try:
+            await caller.send(message)
+        except (ConnectionError, OSError, ValueError):
+            logger.debug(
+                "Stream caller %s disconnected during stream %s",
+                caller_id,
+                message.id,
+            )
+
+    async def _route_stream_end(
+        self,
+        responder: _Client,
+        message: RpcStreamEnd,
+    ) -> None:
+        pending = self._pending_streams.get(message.id)
+        if pending is None:
+            return
+
+        caller_id, target_id = pending
+
+        if responder.service_id != target_id:
+            logger.warning(
+                "Ignoring stream end with mismatched service identity: %s",
+                responder.service_id,
+            )
+            return
+
+        self._pending_streams.pop(message.id, None)
+
+        async with self._clients_lock:
+            caller = self._clients.get(caller_id)
+
+        if caller is None or caller.closed:
+            return
+
+        try:
+            await caller.send(message)
+        except (ConnectionError, OSError, ValueError):
+            logger.debug(
+                "Stream caller %s disconnected before stream completion",
+                caller_id,
+            )
+
+    async def _route_stream_cancel(
+        self,
+        caller: _Client,
+        message: RpcStreamCancel,
+    ) -> None:
+        pending = self._pending_streams.get(message.id)
+        if pending is None:
+            return
+
+        caller_id, target_id = pending
+
+        # Only the original caller may cancel a stream.
+        if caller.service_id != caller_id:
+            logger.warning(
+                "Ignoring unauthorized stream cancellation from %s",
+                caller.service_id,
+            )
+            return
+
+        self._pending_streams.pop(message.id, None)
+
+        async with self._clients_lock:
+            target = self._clients.get(target_id)
+
+        if target is None or target.closed:
+            return
+
+        try:
+            await target.send(message)
+        except (ConnectionError, OSError, ValueError):
+            logger.debug(
+                "Could not forward cancellation for stream %s",
+                message.id,
+            )
+
     async def _publish(self, source: str, message: Publish) -> tuple[str, int]:
         assert self._db is not None
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(UTC).isoformat()
-        payload_json = json.dumps(message.payload, separators=(",", ":"), ensure_ascii=False)
+        payload_json = json.dumps(
+            message.payload, separators=(",", ":"), ensure_ascii=False
+        )
         async with self._db_lock:
             db = self._db
             db.execute("BEGIN IMMEDIATE")
@@ -509,7 +746,14 @@ class CommunicationBroker:
                     db.execute(
                         "INSERT INTO events(event_id,event_type,source,payload_json,occurred_at,created_at) "
                         "VALUES (?,?,?,?,?,?)",
-                        (event_id, message.event_type, source, payload_json, occurred_at, time.time()),
+                        (
+                            event_id,
+                            message.event_type,
+                            source,
+                            payload_json,
+                            occurred_at,
+                            time.time(),
+                        ),
                     )
                     db.executemany(
                         "INSERT INTO deliveries(delivery_id,event_id,service_id,attempts,available_at) "
@@ -541,7 +785,9 @@ class CommunicationBroker:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("Event delivery loop failed for service %s", client.service_id)
+            logger.exception(
+                "Event delivery loop failed for service %s", client.service_id
+            )
 
     async def _claim_next(self, service_id: str) -> dict[str, Any] | None:
         assert self._db is not None
@@ -572,12 +818,23 @@ class CommunicationBroker:
                             "payload_json,occurred_at,service_id,attempts,last_error,failed_at) "
                             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                             (
-                                str(uuid.uuid4()), row["delivery_id"], row["event_id"], row["event_type"],
-                                row["source"], row["payload_json"], row["occurred_at"], service_id,
-                                row["attempts"], row["last_error"], now,
+                                str(uuid.uuid4()),
+                                row["delivery_id"],
+                                row["event_id"],
+                                row["event_type"],
+                                row["source"],
+                                row["payload_json"],
+                                row["occurred_at"],
+                                service_id,
+                                row["attempts"],
+                                row["last_error"],
+                                now,
                             ),
                         )
-                        db.execute("DELETE FROM deliveries WHERE delivery_id=?", (row["delivery_id"],))
+                        db.execute(
+                            "DELETE FROM deliveries WHERE delivery_id=?",
+                            (row["delivery_id"],),
+                        )
                         db.execute(
                             "DELETE FROM events WHERE event_id=? AND NOT EXISTS "
                             "(SELECT 1 FROM deliveries WHERE deliveries.event_id=events.event_id)",
@@ -587,7 +844,11 @@ class CommunicationBroker:
                     attempt = row["attempts"] + 1
                     db.execute(
                         "UPDATE deliveries SET attempts=?,lease_until=? WHERE delivery_id=?",
-                        (attempt, now + self.delivery_lease_seconds, row["delivery_id"]),
+                        (
+                            attempt,
+                            now + self.delivery_lease_seconds,
+                            row["delivery_id"],
+                        ),
                     )
                     result = {
                         "delivery_id": row["delivery_id"],
@@ -638,7 +899,9 @@ class CommunicationBroker:
             ).fetchone()
             if row is None:
                 return
-            delay = min(2.0 ** max(0, int(row["attempts"]) - 1), MAX_RETRY_DELAY_SECONDS)
+            delay = min(
+                2.0 ** max(0, int(row["attempts"]) - 1), MAX_RETRY_DELAY_SECONDS
+            )
             self._db.execute(
                 "UPDATE deliveries SET available_at=?,lease_until=NULL,last_error=? "
                 "WHERE delivery_id=? AND service_id=?",
@@ -662,7 +925,9 @@ class CommunicationBroker:
                     "methods": sorted(client.rpc_methods),
                     "subscriptions": sorted(client.subscriptions),
                 }
-                for client in sorted(self._clients.values(), key=lambda item: item.service_id)
+                for client in sorted(
+                    self._clients.values(), key=lambda item: item.service_id
+                )
                 if not client.closed
             ]
 
@@ -705,6 +970,49 @@ class CommunicationBroker:
                         )
                     except Exception:
                         pass
+
+        for stream_id, (caller_id, target_id) in list(self._pending_streams.items()):
+            if caller_id == client.service_id:
+                # The consumer disappeared. Cancel the producer's work.
+                self._pending_streams.pop(stream_id, None)
+
+                async with self._clients_lock:
+                    target = self._clients.get(target_id)
+
+                if target is not None and not target.closed:
+                    try:
+                        await target.send(RpcStreamCancel(id=stream_id))
+                    except Exception:
+                        logger.debug(
+                            "Could not cancel stream %s after caller disconnect",
+                            stream_id,
+                        )
+
+            elif target_id == client.service_id:
+                # The producer disappeared. Notify the consumer.
+                self._pending_streams.pop(stream_id, None)
+
+                async with self._clients_lock:
+                    caller = self._clients.get(caller_id)
+
+                if caller is not None and not caller.closed:
+                    try:
+                        await caller.send(
+                            RpcStreamEnd(
+                                id=stream_id,
+                                ok=False,
+                                error=(
+                                    f"Service {client.service_id!r} "
+                                    "disconnected during RPC streaming"
+                                ),
+                                error_type="SERVICE_UNAVAILABLE",
+                            )
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Could not notify caller about failed stream %s",
+                            stream_id,
+                        )
 
         client.writer.close()
         try:

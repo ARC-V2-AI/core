@@ -5,6 +5,7 @@ import yaml
 
 from arc.foundation.constants import SERVICE_CONFIG
 from arc.foundation.service import ServiceConfig, ServiceNode, ServiceTree
+from arc.foundation.system_dependencies import SystemDependency
 
 logger = logging.getLogger(__name__)
 
@@ -21,19 +22,15 @@ class ConfigLoader:
         logger.debug(f"Config loader initialized with path: {self._path}")
 
     def locate(self):
-        """
-        Locates the services.arc.yaml file.
-        Intended to be extendable for auto-locate feature in the future.
-        """
+        """Locate the services.arc.yaml file."""
         _path = self._path
         if not _path.exists():
-            # TODO: add auto-locate functionalities
-
             logger.error(f"Service configuration not found should be at: {_path}")
 
             if not self._autofix:
                 raise ConfigNotFoundError(
-                    "Could not find the 'services.arc.yaml' file.\nThis file is needed for system startup!"
+                    "Could not find the 'services.arc.yaml' file.\n"
+                    "This file is needed for system startup!"
                 )
 
             logger.warning(
@@ -46,9 +43,9 @@ class ConfigLoader:
         return self._path
 
     def load(self) -> dict[str, ServiceConfig]:
-        """Load the Service-Configurations"""
-        with self.locate().open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        """Load the service configurations."""
+        with self.locate().open("r", encoding="utf-8") as file:
+            data = yaml.safe_load(file)
 
         services: dict[str, ServiceConfig] = {}
 
@@ -56,7 +53,6 @@ class ConfigLoader:
             logger.warning(
                 "No data in service configuration! This leads to no running services."
             )
-
             return services
 
         for name, cfg in data.get("services", {}).items():
@@ -66,6 +62,11 @@ class ConfigLoader:
                 restart=cfg.get("restart", "never"),
                 health=cfg.get("health", "ignore"),
                 depends_on=cfg.get("depends", []),
+                package=cfg.get("package"),
+                system_dependencies=[
+                    SystemDependency.model_validate(item)
+                    for item in (cfg.get("system_dependencies") or [])
+                ],
             )
 
         return services
@@ -74,7 +75,6 @@ class ConfigLoader:
     def sort_to_tree(
         services: dict[str, ServiceConfig],
     ) -> ServiceTree:
-
         levels: ServiceTree = []
 
         remaining = set(services.keys())
@@ -85,17 +85,14 @@ class ConfigLoader:
 
             for name in remaining:
                 service = services[name]
-
                 if all(dep in completed for dep in service.depends_on):
                     current_level.append((name, service))
 
             if not current_level:
                 raise RuntimeError("Circular dependency detected or missing dependency")
 
-            levels.append(sorted(current_level, key=lambda x: x[0]))
-
+            levels.append(sorted(current_level, key=lambda item: item[0]))
             completed.update(name for name, _ in current_level)  # pyright: ignore[reportUnknownMemberType]
-
             remaining -= {name for name, _ in current_level}
 
         logger.debug(
@@ -106,10 +103,9 @@ class ConfigLoader:
         return levels
 
     def run(self) -> ServiceTree:
-        """Fetch the Service-Tree from the services.arc.yaml"""
+        """Fetch the service tree from the service configuration."""
         logger.info("Building service startup tree")
         services = self.load()
         service_tree = self.sort_to_tree(services)
         logger.info("Service startup tree ready")
-
         return service_tree

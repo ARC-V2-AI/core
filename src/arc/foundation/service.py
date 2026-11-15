@@ -9,6 +9,8 @@ from enum import Enum
 from logging import Logger
 from typing import TYPE_CHECKING, TypeAlias
 
+from arc.foundation.system_dependencies import SystemDependency
+
 if TYPE_CHECKING:
     # Used to prevent an hard import cycle
     from arc.foundation.service_process import ServiceProcess
@@ -21,6 +23,8 @@ class ServiceConfig:
     restart: str = "never"
     health: str = "ignore"
     depends_on: list[str] = field(default_factory=list)
+    package: str | None = None
+    system_dependencies: list[SystemDependency] = field(default_factory=list)
 
 
 ServiceNode: TypeAlias = tuple[str, ServiceConfig]
@@ -54,9 +58,6 @@ class BaseContext:
     process_name: str = ""
 
 
-#
-# This is the base service contract for pulse to use for handling a service instance
-#
 class Service(ABC):
     _info: ServiceInfo
 
@@ -126,5 +127,5 @@ class ServiceInstance:
 
     @classmethod
     def from_config_registry(cls, config: ServiceConfig):
-        """Create the ServiceInstance class from ServiceConfig (method intended for pulse-registry)"""
+        """Create a ServiceInstance from the service configuration."""
         return cls(config, state=ServiceState.REGISTERED)

@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from arc.foundation.system_dependencies import SystemDependency
+
 # unique-name : github url
 SERVICE_REGISTRY: dict[str, str] = {
     "arc-v2-service-runner": "https://github.com/ARC-V2-AI/service-runner.git"
@@ -25,9 +27,8 @@ class ServiceSpec(BaseModel):
     restart: str = "never"
     health: str = "ignore"
 
-    depends: list[str] = Field(
-        default_factory=list,
-    )
+    depends: list[str] = Field(default_factory=list)
+    system_dependencies: list[SystemDependency] = Field(default_factory=list)
 
 
 class ResolvedSource(BaseModel):

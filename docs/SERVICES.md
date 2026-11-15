@@ -106,6 +106,11 @@ description = "Minimal service used to test ARC Pulse"
 restart = "on-failure"
 health = "restart"
 depends = []
+
+system_dependencies = [
+    { kind = "shared-library", name = "libcuda.so.1", required = true },
+    { kind = "command", name = "ffmpeg", required = false },
+]
 ```
 
 The Python dependency:
@@ -435,6 +440,60 @@ memory ─────┘
 ```
 
 `inference` and `memory` can start independently. The `agent` service is started only after its required dependencies are ready.
+
+## System dependencies
+
+System dependencies are operating-system resources required by a service but not installed by Python's package manager. Declare them in the service's `pyproject.toml` under `[tool.arc.service]` using `system_dependencies`.
+
+```toml
+[tool.arc.service]
+id = "example"
+module = "example_service.service"
+
+system_dependencies = [
+    { kind = "shared-library", name = "libcuda.so.1", required = true },
+    { kind = "command", name = "ffmpeg", required = false },
+]
+```
+
+Each entry has three fields:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | Dependency type. Supported values are `shared-library` and `command`. |
+| `name` | Shared-library name or executable name to check. |
+| `required` | Whether the dependency is mandatory for the service to run. |
+
+Use `required = true` for dependencies without which the service cannot operate. A missing required dependency blocks the service from starting. Use `required = false` for optional capabilities; a missing optional dependency produces a warning but does not block startup.
+
+For example, a service that requires CUDA at startup but can use an alternate media backend without FFmpeg could declare:
+
+```toml
+system_dependencies = [
+    { kind = "shared-library", name = "libcudart.so.13", required = true },
+    { kind = "command", name = "ffmpeg", required = false },
+]
+```
+
+### When checks run
+
+- **Installation:** Forge checks system dependencies after installing the service package. Missing dependencies are reported; the package remains installed and registered.
+- **Startup:** Pulse checks again before launching the service process. Missing required dependencies prevent that service from starting.
+
+The startup check runs before the Service Runner imports the service module. This catches missing native libraries that would otherwise cause an import-time failure before the service lifecycle begins.
+
+### Automatic detection and limitations
+
+ARC Core can automatically inspect installed Python dependencies for unresolved ELF shared-library links. This inspection reads binary metadata such as `DT_NEEDED`, `DT_RPATH`, and `DT_RUNPATH` using `readelf` or `objdump`; it does not execute the binaries.
+
+Declare dependencies explicitly when they are loaded dynamically (for example through `dlopen`) or when the service requires an external command. ELF inspection alone cannot reliably determine hardware availability or driver/runtime compatibility.
+
+The checker reports missing dependencies; it does not install operating-system packages. This allows the service author to document the requirement while leaving installation to the system administrator or user.
+
+`system_dependencies` is separate from `depends`:
+
+- `depends` declares other ARC services that must become ready first.
+- `system_dependencies` declares operating-system resources required by this service.
 
 ## Example
 

@@ -19,6 +19,43 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+_BUILD_MARKERS = (
+    "building wheel",
+    "building editable",
+    "running build",
+    "build_ext",
+    "cmake",
+    "ninja",
+    "meson",
+    "compiling",
+    "gcc",
+    "g++",
+    "clang",
+    "c++",
+    "cxx",
+    "linking",
+)
+
+_NOISE_MARKERS = (
+    "cache hit",
+    "cache miss",
+    "cache entry",
+    "cache directory",
+    "using cached",
+    "cached at",
+)
+
+
+def _is_debug_output(line: str) -> bool:
+    """Hide routine resolver/cache diagnostics from the interactive output."""
+    normalized = line.strip().lower()
+
+    return (
+        normalized.startswith(("debug ", "trace "))
+        or any(marker in normalized for marker in _NOISE_MARKERS)
+    )
+
+
 class VirtualEnvError(RuntimeError):
     pass
 
@@ -104,12 +141,7 @@ class VirtualEnvManager:
                         lowered = line.lower()
 
                         if not building_native and any(
-                            marker in lowered
-                            for marker in (
-                                "cmake", "ninja", "meson", "build_ext", "compiling",
-                                "gcc", "g++", "clang", "c++", "cxx", "running build",
-                                "building wheel",
-                            )
+                            marker in lowered for marker in _BUILD_MARKERS
                         ):
                             building_native = True
                             progress.update(
@@ -117,10 +149,13 @@ class VirtualEnvManager:
                                 description="Building native dependencies",
                             )
 
-                        progress.console.print(
-                            Text("  ", style="dim") + Text.from_ansi(line),
-                            soft_wrap=True,
-                        )
+                        # Keep the live output useful: retain build/compiler messages,
+                        # but omit routine cache and verbose resolver diagnostics.
+                        if not _is_debug_output(line):
+                            progress.console.print(
+                                Text("  ", style="dim") + Text.from_ansi(line),
+                                soft_wrap=True,
+                            )
 
                 returncode = process.wait()
 
@@ -302,7 +337,6 @@ class VirtualEnvManager:
 
         args = [
             "uv",
-            "-v",
             "pip",
             "install",
             "--python",
@@ -326,7 +360,6 @@ class VirtualEnvManager:
 
         args = [
             "uv",
-            "-v",
             "pip",
             "install",
             "--python",

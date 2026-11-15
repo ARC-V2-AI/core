@@ -5,7 +5,6 @@ from importlib.metadata import version as package_version
 
 import cyclopts
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 from arc.boot.boot import main as boot
@@ -83,17 +82,17 @@ def install(
     autofix: bool = False,
     debug: bool = False,
 ) -> None:
+    console.print()
+    console.print("[bold cyan]ARC-V2[/bold cyan] [dim]· FORGE[/dim]")
+    console.print("[dim]────────────────────────────────────────────────────[/dim]")
+    console.print("[bold]Installing service[/bold]")
+    console.print(f"[cyan]{source}[/cyan]")
     console.print(
-        Panel(
-            "[bold]Installing ARC service[/bold]\n"
-            f"[cyan]{source}[/cyan]\n\n"
-            "[dim]Dependency installation may compile native code and take several minutes. "
-            "Keep this terminal open while the installation is running.[/dim]",
-            title="[bold cyan]ARC-V2 · FORGE[/bold cyan]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
+        "[dim]Installation time depends on the package. Packages with native "
+        "dependencies may need to compile and can take several minutes.[/dim]"
     )
+    console.print("[dim]Please keep this terminal open until installation finishes.[/dim]")
+    console.print()
 
     try:
         forge = Forge.from_env(

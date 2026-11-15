@@ -500,29 +500,33 @@ class Forge:
 
         install_target = self._install_target(resolved_source)
 
-        if resolved_source.kind == "git" or resolved_source.kind == "registry":
-            self.runtime.install_git(install_target, editable=editable)
-
-        else:
-            self.runtime.install(
-                install_target,
-                editable=editable,
-            )
-
         try:
-            self._register_service(spec)
+            if resolved_source.kind == "git" and editable:
+                # Editable Git installations must use the original source URL.
+                self.runtime.install_git(
+                    resolved_source.location,
+                    editable=True,
+                )
+            else:
+                # Install from the already checked-out local project directory.
+                self.runtime.install(
+                    install_target,
+                    editable=editable,
+                )
 
-            self.lock.upsert(  # pyright: ignore[reportUnknownMemberType]
+            self._register_service(spec)
+            self.lock.upsert(
                 self._lock_record(
                     spec,
                     resolved_source,
                     editable=editable,
                 )
             )
-        except Exception:  # noqa: TRY203
-            # The package is already installed at this point.
-            # Do not silently pretend installation failed completely.
-            raise
+
+        finally:
+            # The temporary checkout is no longer needed after installation.
+            if resolved_source.kind == "git" and resolved_source.path is not None:
+                shutil.rmtree(resolved_source.path, ignore_errors=True)
 
         return spec
 

@@ -4,13 +4,19 @@ import json
 import logging
 import shutil
 import subprocess
+from collections import deque
 from importlib.metadata import version
 from pathlib import Path
+
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.text import Text
 
 from arc.forge.types import SERVICE_REGISTRY
 from arc.foundation.constants import SERVICE_RUNTIME_DIR
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 
 class VirtualEnvError(RuntimeError):
@@ -39,22 +45,114 @@ class VirtualEnvManager:
     def _run(
         self,
         args: list[str],
+        *,
+        task: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """Run a command, optionally streaming its output with live progress."""
+        if task is None:
+            try:
+                return subprocess.run(
+                    args,
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+            except FileNotFoundError as exc:
+                raise VirtualEnvError(f"Executable not found: {args[0]}") from exc
+            except subprocess.CalledProcessError as exc:
+                details = (exc.stderr or exc.stdout or "").strip()
+                raise VirtualEnvError(
+                    f"Command failed ({exc.returncode}): "
+                    f"{' '.join(args)}\n{details}"
+                ) from exc
+
+        output_tail: deque[str] = deque(maxlen=40)
+        process: subprocess.Popen[str] | None = None
+        building_native = False
+
         try:
-            return subprocess.run(
-                args,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[bold cyan]{task.description}[/bold cyan]"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=True,
+                refresh_per_second=10,
+            ) as progress:
+                task_id = progress.add_task(task, total=None)
+
+                process = subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+
+                if process.stdout is None:
+                    raise VirtualEnvError("Could not capture command output.")
+
+                with process.stdout:
+                    for raw_line in process.stdout:
+                        line = raw_line.rstrip("\r\n")
+                        if not line:
+                            continue
+
+                        output_tail.append(line)
+                        lowered = line.lower()
+
+                        if not building_native and any(
+                            marker in lowered
+                            for marker in (
+                                "cmake", "ninja", "meson", "build_ext", "compiling",
+                                "gcc", "g++", "clang", "c++", "cxx", "running build",
+                                "building wheel",
+                            )
+                        ):
+                            building_native = True
+                            progress.update(
+                                task_id,
+                                description="Building native dependencies",
+                            )
+
+                        progress.console.print(
+                            Text("  ", style="dim") + Text.from_ansi(line),
+                            soft_wrap=True,
+                        )
+
+                returncode = process.wait()
+
         except FileNotFoundError as exc:
             raise VirtualEnvError(f"Executable not found: {args[0]}") from exc
-        except subprocess.CalledProcessError as exc:
+        except BaseException:
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+
+        if returncode != 0:
+            details = "\n".join(output_tail)
             raise VirtualEnvError(
-                f"Command failed ({exc.returncode}): "
-                f"{' '.join(args)}\n"
-                f"{exc.stderr.strip()}"
-            ) from exc
+                f"Command failed ({returncode}): {' '.join(args)}"
+                + (f"\nLast output:\n{details}" if details else "")
+            )
+
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=returncode,
+            stdout="",
+            stderr="",
+        )
 
     @property
     def venv_exists(self):
@@ -85,7 +183,8 @@ class VirtualEnvManager:
                 "uv",
                 "venv",
                 str(self.venv_dir),
-            ]
+            ],
+            task="Preparing ARC runtime",
         )
 
         self._require_runtime()
@@ -203,6 +302,7 @@ class VirtualEnvManager:
 
         args = [
             "uv",
+            "-v",
             "pip",
             "install",
             "--python",
@@ -214,7 +314,7 @@ class VirtualEnvManager:
 
         args.append(source)
 
-        self._run(args)
+        self._run(args, task="Resolving and installing dependencies")
 
     def install(
         self,
@@ -226,6 +326,7 @@ class VirtualEnvManager:
 
         args = [
             "uv",
+            "-v",
             "pip",
             "install",
             "--python",
@@ -237,7 +338,7 @@ class VirtualEnvManager:
 
         args.append(package)
 
-        self._run(args)
+        self._run(args, task="Resolving and installing dependencies")
 
     def update(self, package: str) -> None:
         self._require_uv()
@@ -252,7 +353,8 @@ class VirtualEnvManager:
                 "--python",
                 str(self.python),
                 package,
-            ]
+            ],
+            task=f"Updating {package}",
         )
 
     def remove(self, package: str) -> None:
@@ -267,7 +369,8 @@ class VirtualEnvManager:
                 "--python",
                 str(self.python),
                 package,
-            ]
+            ],
+            task=f"Removing {package}",
         )
 
 

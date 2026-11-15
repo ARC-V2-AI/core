@@ -5,6 +5,7 @@ from importlib.metadata import version as package_version
 
 import cyclopts
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from arc.boot.boot import main as boot
@@ -82,6 +83,18 @@ def install(
     autofix: bool = False,
     debug: bool = False,
 ) -> None:
+    console.print(
+        Panel(
+            "[bold]Installing ARC service[/bold]\n"
+            f"[cyan]{source}[/cyan]\n\n"
+            "[dim]Dependency installation may compile native code and take several minutes. "
+            "Keep this terminal open while the installation is running.[/dim]",
+            title="[bold cyan]ARC-V2 · FORGE[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
     try:
         forge = Forge.from_env(
             autofix=autofix,
@@ -92,6 +105,9 @@ def install(
             editable=editable,
         )
 
+    except KeyboardInterrupt:
+        console.print("[yellow]Installation interrupted by user.[/yellow]")
+        raise SystemExit(130) from None
     except Exception as exc:
         _handle_cli_error(
             exc,
@@ -99,7 +115,10 @@ def install(
         )
         raise SystemExit(1) from None
 
-    console.print(f"[green]Installed[/green] '{spec.id}' [dim]({spec.version})[/dim]")
+    console.print(
+        f"[bold green]✓ Installed[/bold green] '{spec.id}' "
+        f"[dim]({spec.version})[/dim]"
+    )
 
 
 @app.command

@@ -203,12 +203,6 @@ Install a service from a source:
 arc install <source>
 ```
 
-Install in editable mode:
-
-```bash
-arc install <source> --editable
-```
-
 ### Remove a Service
 
 ```bash

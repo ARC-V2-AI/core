@@ -50,11 +50,11 @@ def set_env(key: str, value: T):  # pyright: ignore[reportInvalidTypeVarUse]
 
 
 _DEV = {
-    "TERMINAL_NO_COLOR": "0",
-    "PYTHONUNBUFFERED": "1",
-    "STRICT_ERRORS": "1",
+    "TERMINAL_NO_COLOR": "false",
+    "PYTHONUNBUFFERED": "true",
+    "STRICT_ERRORS": "true",
     # ---
-    "WAIT_ON_DEPENDENCIES": "1",
+    "WAIT_ON_DEPENDENCIES": "true",
     "MAX_UNHEALTHY_SERVICE_CHECKS": "3",
     # ---
     "ARC_DIR": "~/arc",
@@ -64,9 +64,9 @@ _DEV = {
     # ---
     "LOG_LEVEL": "INFO",
     "LOG_FILE": "~/arc/arc.log",
-    "LOG_CONSOLE": "1",
-    "LOG_JSON": "0",
-    "LOG_ROTATE": "1",
+    "LOG_CONSOLE": "true",
+    "LOG_JSON": "false",
+    "LOG_ROTATE": "true",
     "LOG_MAX_BYTES": "10485760",
     "LOG_BACKUP_COUNT": "2",
     # ---

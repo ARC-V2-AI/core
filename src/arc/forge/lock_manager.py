@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-import tomllib
 from pathlib import Path
 
 import tomli_w
@@ -16,7 +15,7 @@ class LockFile:
     ) -> None:
         self.path = Path(path)
 
-    def load(self):
+    def load(self) -> dict:
         if not self.path.exists():
             return {
                 "version": 1,
@@ -24,26 +23,27 @@ class LockFile:
                 "package": [],
             }
 
+        import tomllib
+
         with self.path.open("rb") as file:
             return tomllib.load(file)
 
     def upsert(
         self,
-        package,
+        package: dict,
     ) -> None:
         data = self.load()
-
-        packages = data.setdefault(
-            "package",
-            [],
-        )
-
+        packages = data.setdefault("package", [])
         packages[:] = [item for item in packages if item["name"] != package["name"]]
-
         packages.append(package)
-
         data["revision"] = int(data.get("revision", 0)) + 1
+        self._write(data)
 
+    def replace_packages(self, packages: list[dict]) -> None:
+        """Replace all package records in one lock-file write."""
+        data = self.load()
+        data["package"] = packages
+        data["revision"] = int(data.get("revision", 0)) + 1
         self._write(data)
 
     def remove(
@@ -51,18 +51,15 @@ class LockFile:
         package_name: str,
     ) -> None:
         data = self.load()
-
         data["package"] = [
             item for item in data.get("package", []) if item["name"] != package_name
         ]
-
         data["revision"] = int(data.get("revision", 0)) + 1
-
         self._write(data)
 
     def _write(
         self,
-        data,
+        data: dict,
     ) -> None:
         self.path.parent.mkdir(
             parents=True,
@@ -76,7 +73,6 @@ class LockFile:
             delete=False,
         ) as file:
             temporary = Path(file.name)
-
             file.write(tomli_w.dumps(data).encode("utf-8"))
 
         temporary.replace(self.path)

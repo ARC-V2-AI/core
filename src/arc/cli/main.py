@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from importlib.metadata import version as package_version
 
 import cyclopts
 from rich.console import Console
+from rich.prompt import Prompt
 from rich.table import Table
 
 from arc.boot.boot import main as boot
@@ -78,7 +80,6 @@ async def start(
 def install(
     source: str,
     *,
-    editable: bool = False,
     autofix: bool = False,
     debug: bool = False,
 ) -> None:
@@ -99,10 +100,7 @@ def install(
             autofix=autofix,
         )
 
-        spec = forge.install(
-            source,
-            editable=editable,
-        )
+        spec = forge.install(source)
 
     except KeyboardInterrupt:
         console.print("[yellow]Installation interrupted by user.[/yellow]")
@@ -118,6 +116,48 @@ def install(
         f"[bold green]✓ Installed[/bold green] '{spec.id}' "
         f"[dim]({spec.version})[/dim]"
     )
+
+
+@app.command
+def update(
+    *,
+    autofix: bool = False,
+    debug: bool = False,
+) -> None:
+    console.print()
+    console.print("[bold cyan]ARC-V2[/bold cyan] [dim]· FORGE[/dim]")
+    console.print("[dim]────────────────────────────────────────────────────[/dim]")
+    console.print("[bold]Updating installed ARC components[/bold]")
+    console.print(
+        "[dim]All locked services are resolved together so uv can select "
+        "a consistent set of declared dependencies.[/dim]"
+    )
+    console.print()
+
+    try:
+        forge = Forge.from_env(autofix=autofix)
+        updates = forge.update()
+    except KeyboardInterrupt:
+        console.print("[yellow]Update interrupted by user.[/yellow]")
+        raise SystemExit(130) from None
+    except Exception as exc:
+        _handle_cli_error(exc, debug=debug)
+        raise SystemExit(1) from None
+
+    if not updates:
+        console.print("[dim]No ARC services are installed.[/dim]")
+        return
+
+    table = Table(title="Updated ARC Services", header_style="bold")
+    table.add_column("Service", no_wrap=True)
+    table.add_column("Previous", no_wrap=True)
+    table.add_column("Current", no_wrap=True)
+
+    for service_id, previous, current in updates:
+        table.add_row(service_id, previous, current)
+
+    console.print(table)
+    console.print("[bold green]✓ ARC components updated[/bold green]")
 
 
 @app.command
@@ -147,10 +187,17 @@ def remove(
 @app.command(name="list")
 def list_services(
     *,
+    native: bool = False,
+    autofix: bool = False,
     debug: bool = False,
 ) -> None:
+    """List installed services, or the official ARC service catalog."""
     try:
-        forge = Forge.from_env()
+        forge = Forge.from_env(autofix=autofix)
+        if native:
+            _list_native_services(forge, debug=debug)
+            return
+
         services = forge.list()
 
     except Exception as exc:
@@ -169,22 +216,10 @@ def list_services(
         header_style="bold",
     )
 
-    table.add_column(
-        "ID",
-        no_wrap=True,
-    )
-    table.add_column(
-        "Version",
-        no_wrap=True,
-    )
-    table.add_column(
-        "Package",
-        no_wrap=True,
-    )
-    table.add_column(
-        "Module",
-        no_wrap=True,
-    )
+    table.add_column("ID", no_wrap=True)
+    table.add_column("Version", no_wrap=True)
+    table.add_column("Package", no_wrap=True)
+    table.add_column("Module", no_wrap=True)
 
     for spec in services:
         table.add_row(
@@ -195,6 +230,93 @@ def list_services(
         )
 
     console.print(table)
+
+
+def _list_native_services(forge: Forge, *, debug: bool) -> None:
+    """Display official services and optionally install selected entries."""
+    native_services = forge.list_native()
+    if not native_services:
+        console.print("[dim]No official ARC services are currently published.[/dim]")
+        return
+
+    table = Table(
+        title="Official ARC Services",
+        header_style="bold",
+    )
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("Service", no_wrap=True)
+    table.add_column("Version", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Repository", overflow="fold")
+
+    available: list[tuple[str, str]] = []
+    for service_id, repository, installed_spec in native_services:
+        if installed_spec is None:
+            selection = str(len(available) + 1)
+            version_text = "—"
+            status = "[yellow]○ Available[/yellow]"
+            available.append((service_id, repository))
+        else:
+            selection = "—"
+            version_text = installed_spec.version
+            status = "[green]✓ Installed[/green]"
+
+        table.add_row(selection, service_id, version_text, status, repository)
+
+    console.print(table)
+
+    if not available:
+        console.print("[dim]All official ARC services are already installed.[/dim]")
+        return
+
+    if not sys.stdin.isatty():
+        console.print(
+            "[dim]Install an available service with "
+            "`arc install <service-id>`.[/dim]"
+        )
+        return
+
+    console.print(
+        "[dim]Select one or more available services by number, separated by commas. "
+        "Enter 'q' to cancel.[/dim]"
+    )
+    selection = Prompt.ask("Install", console=console, default="q").strip().lower()
+    if selection in {"", "q", "quit", "cancel"}:
+        return
+
+    selected_indices: list[int] = []
+    try:
+        for value in selection.split(","):
+            index = int(value.strip())
+            if index < 1 or index > len(available):
+                raise ValueError
+            if index not in selected_indices:
+                selected_indices.append(index)
+    except ValueError:
+        console.print(
+            f"[red]Invalid selection.[/red] Choose numbers from 1 to {len(available)}, "
+            "separated by commas, or enter 'q' to cancel."
+        )
+        return
+
+    for index in selected_indices:
+        service_id, _repository = available[index - 1]
+        console.print()
+        console.print(f"[bold]Installing {service_id}[/bold]")
+        try:
+            spec = forge.install(service_id)
+        except KeyboardInterrupt:
+            console.print("[yellow]Installation interrupted by user.[/yellow]")
+            raise SystemExit(130) from None
+        except Exception as exc:
+            _handle_cli_error(exc, debug=debug)
+            console.print(f"[red]Could not install {service_id}.[/red]")
+            continue
+
+        console.print(
+            f"[bold green]✓ Installed[/bold green] '{spec.id}' "
+            f"[dim]({spec.version})[/dim]"
+        )
 
 
 @app.command

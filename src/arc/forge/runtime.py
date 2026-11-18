@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from collections import deque
@@ -12,7 +13,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
-from arc.forge.types import SERVICE_REGISTRY
+from arc.forge.types import SERVICE_RUNNER_REGISTRY
 from arc.foundation.constants import SERVICE_RUNTIME_DIR
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class VirtualEnvManager:
         args: list[str],
         *,
         task: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run a command, optionally streaming its output with live progress."""
         if task is None:
@@ -93,6 +95,7 @@ class VirtualEnvManager:
                     check=True,
                     text=True,
                     capture_output=True,
+                    env=env,
                 )
             except FileNotFoundError as exc:
                 raise VirtualEnvError(f"Executable not found: {args[0]}") from exc
@@ -126,6 +129,7 @@ class VirtualEnvManager:
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    env=env,
                 )
 
                 if process.stdout is None:
@@ -326,7 +330,6 @@ class VirtualEnvManager:
         url: str,
         *,
         ref: str | None = None,
-        editable: bool = False,
     ) -> None:
         self.create()
 
@@ -343,9 +346,6 @@ class VirtualEnvManager:
             str(self.python),
         ]
 
-        if editable:
-            args.append("--editable")
-
         args.append(source)
 
         self._run(args, task="Resolving and installing dependencies")
@@ -353,8 +353,6 @@ class VirtualEnvManager:
     def install(
         self,
         package: str,
-        *,
-        editable: bool = False,
     ) -> None:
         self.create()
 
@@ -365,9 +363,6 @@ class VirtualEnvManager:
             "--python",
             str(self.python),
         ]
-
-        if editable:
-            args.append("--editable")
 
         args.append(package)
 
@@ -388,6 +383,49 @@ class VirtualEnvManager:
                 package,
             ],
             task=f"Updating {package}",
+        )
+
+    def sync_project(
+        self,
+        project_dir: str | Path,
+        *,
+        upgrade: bool = False,
+    ) -> None:
+        """Sync a uv project into ARC's shared runtime without editable links.
+
+        ``--active`` targets the ARC runtime venv supplied through VIRTUAL_ENV.
+        ``--inexact`` retains packages installed for other services, while
+        ``--no-editable`` makes service code self-contained in the runtime.
+        The project-mode command also honours the project's ``tool.uv.sources``
+        and named index configuration.
+        """
+        self.create()
+        project_path = Path(project_dir).expanduser().resolve()
+        if not (project_path / "pyproject.toml").is_file():
+            raise VirtualEnvError(f"Missing project pyproject.toml: {project_path}")
+
+        environment = os.environ.copy()
+        environment["VIRTUAL_ENV"] = str(self.venv_dir)
+        environment["PATH"] = os.pathsep.join(
+            [str(self.venv_dir / "bin"), environment.get("PATH", "")]
+        )
+
+        args = [
+            "uv",
+            "sync",
+            "--active",
+            "--inexact",
+            "--no-editable",
+            "--project",
+            str(project_path),
+        ]
+        if upgrade:
+            args.append("--upgrade")
+
+        self._run(
+            args,
+            task=("Updating ARC components" if upgrade else "Installing ARC service"),
+            env=environment,
         )
 
     def remove(self, package: str) -> None:
@@ -417,13 +455,20 @@ class RuntimeBootstrap:
     ) -> None:
         self.runtime: VirtualEnvManager = runtime
 
+    @staticmethod
+    def runner_requirement() -> str:
+        """Return the runner source pinned to the Core's installed API version."""
+        framework_version = version(SERVICE_RUNNER_PACKAGE)
+        source = SERVICE_RUNNER_REGISTRY.get(SERVICE_RUNNER_PACKAGE)
+        if source is None:
+            raise RuntimeError(f"No source registered for {SERVICE_RUNNER_PACKAGE!r}")
+        return f"git+{source}@v{framework_version}"
+
     def ensure(self, autofix: bool = False) -> None:
         self.runtime.ensure_venv(autofix)
 
         framework_version = version(SERVICE_RUNNER_PACKAGE)
-
-        source = SERVICE_REGISTRY.get(SERVICE_RUNNER_PACKAGE)
-
+        source = SERVICE_RUNNER_REGISTRY.get(SERVICE_RUNNER_PACKAGE)
         if source is None:
             raise RuntimeError(f"No source registered for {SERVICE_RUNNER_PACKAGE!r}")
 

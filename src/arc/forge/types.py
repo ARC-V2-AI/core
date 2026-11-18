@@ -7,10 +7,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from arc.foundation.system_dependencies import SystemDependency
 
-# unique-name : github url
-SERVICE_REGISTRY: dict[str, str] = {
-    "arc-v2-service-runner": "https://github.com/ARC-V2-AI/service-runner.git"
+# Official, user-installable ARC service repositories. Add new service slugs
+# here when they are published by the ARC-V2-AI organization.
+OFFICIAL_COMPONENT_REGISTRY: dict[str, str] = {
+    "inference-runtime": "https://github.com/ARC-V2-AI/inference-runtime.git",
 }
+
+# Framework packages are managed internally and are not user-installable services.
+SERVICE_RUNNER_REGISTRY: dict[str, str] = {
+    "arc-v2-service-runner": "https://github.com/ARC-V2-AI/service-runner.git",
+}
+
+# Backwards-compatible name for existing internal imports.
+SERVICE_REGISTRY = SERVICE_RUNNER_REGISTRY
 
 
 class ServiceSpec(BaseModel):
